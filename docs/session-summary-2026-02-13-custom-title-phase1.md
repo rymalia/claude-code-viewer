@@ -70,7 +70,7 @@ The `feature/support-custom-title-agent-name` branch was renamed to `dev`. The `
 
 Phase 2 adds feature behavior — displaying and indexing custom titles. It should be implemented on a new feature branch from `main` (after PR #152 merges).
 
-The full plan is in `docs/feature_plan_custom_title_agent_name_support_revised.md` on the feature branch. Key work items:
+The full plan is in `docs/feature_plan_custom_title_agent_name_support_revised.md` on the `dev` branch (formerly feature branch). Key work items:
 
 1. **Backend**: Add `customTitle` field to `sessionMetaSchema` and extract it in `SessionMetaService.getSessionMeta()` (last `custom-title` entry wins for multiple renames)
 2. **Frontend**: Update 4 title-display locations to prioritize `customTitle` over `firstUserMessage` — `SessionsTab.tsx`, `SessionHistoryPopover.tsx`, `SessionPageMain.tsx` (2 locations)
