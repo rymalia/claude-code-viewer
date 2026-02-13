@@ -13,7 +13,7 @@ Claude Code Viewer's Zod schema doesn't recognize these types, so they appear as
 - **Multiple renames**: A user can `/rename` multiple times. Always use the **last** `custom-title` entry in the JSONL (most recent rename wins). Iterate the full `lines` array rather than stopping at the first match.
 - **`agent-name` scope**: For now, `agent-name` is parsed but not stored or displayed. It appears to be an internal agent identifier. We may revisit displaying it later, but the current scope is: parse it (no more schema errors), hide it from rendering, and ignore it in search/metadata.
 - **Cache invalidation**: `SessionMetaService` already caches `SessionMeta` in a `Ref` and invalidates via the existing `invalidateSession()` method triggered by SSE `sessionChanged` events. This existing mechanism is sufficient — no new invalidation logic needed. When a user `/rename`s a live session, the JSONL file changes, SSE fires, cache invalidates, and the next read picks up the new `customTitle`.
-- **Type cascade**: After Step 1, the `Conversation` type (`z.infer<typeof ConversationSchema>`) automatically widens to include the new types. This will cause TypeScript errors in files that do exhaustive type narrowing (e.g., `getConversationKey`'s `satisfies never`, `extractSearchableText`'s implicit `return null`). Expect these errors until Steps 2-5 are complete.
+- **Type cascade**: After Step 1, the `Conversation` type (`z.infer<typeof ConversationSchema>`) automatically widens to include the new types. This will cause TypeScript errors in files that do exhaustive type narrowing (e.g., `getConversationKey`'s `satisfies never`) **and** in files that access fields like `.isSidechain` or `.uuid` after incomplete type narrowing (e.g., `useSidechain.ts`, the second `isSidechain` check in `ConversationList.tsx`). TypeScript does not narrow types through non-type-guard function calls — even if `shouldRenderConversation()` filters the new types at runtime, TypeScript still sees them in subsequent code. Expect these errors until Steps 2-5 are complete.
 
 ## Implementation Steps
 
@@ -66,9 +66,50 @@ This alone fixes the schema validation errors — they'll parse correctly instea
 
 **Modify** `src/app/projects/[projectId]/sessions/[sessionId]/components/conversationList/ConversationList.tsx`
 
-- `getConversationKey()` (line 36): Add cases for `"custom-title"` and `"agent-name"` so the `satisfies never` exhaustive check passes. Use format: `custom-title_${conversation.sessionId}` and `agent-name_${conversation.sessionId}`
+- `getConversationKey()` (line 36): Add cases for `"custom-title"` and `"agent-name"` so the `satisfies never` exhaustive check passes. Use format: `custom-title_${conversation.sessionId}_${conversation.customTitle}` and `agent-name_${conversation.sessionId}_${conversation.agentName}` (include the value to avoid duplicate keys when a user `/rename`s multiple times)
 - `shouldRenderConversation()` (line 283): Return `false` for these types **before** the `isSidechain` check (line 290-294). This is important because `custom-title` and `agent-name` don't have an `isSidechain` field — if the check reaches the isSidechain line, it would fail. Add them alongside the existing `if (conv.type === "progress") return false;` pattern.
+- **Second `isSidechain` check** (line 390-395): There is a second `isSidechain` access in the rendering path's layout logic. Even though `shouldRenderConversation()` filters the new types at runtime, TypeScript doesn't narrow through non-type-guard functions, so the new types are still visible at this point. Add `conversation.type !== "custom-title" && conversation.type !== "agent-name"` to the condition:
+  ```typescript
+  const isSidechain =
+    conversation.type !== "summary" &&
+    conversation.type !== "file-history-snapshot" &&
+    conversation.type !== "queue-operation" &&
+    conversation.type !== "progress" &&
+    conversation.type !== "custom-title" &&
+    conversation.type !== "agent-name" &&
+    conversation.isSidechain;
+  ```
 - Timestamp visibility logic (line 319): Add `"custom-title"` and `"agent-name"` to the list alongside `"summary"`, `"progress"`, `"queue-operation"`, `"file-history-snapshot"` that gets `showTimestamp: false`
+
+**Modify** `src/app/projects/[projectId]/sessions/[sessionId]/hooks/useSidechain.ts`
+
+This file operates on `Conversation[]` and accesses `.isSidechain` and `.uuid` after incomplete type narrowing. Two fixes needed:
+
+- Filter at lines 12-15: Add `"custom-title"` and `"agent-name"` to the type exclusion list so they don't reach the `.isSidechain` access on line 17:
+  ```typescript
+  .filter(
+    (conv) =>
+      conv.type !== "summary" &&
+      conv.type !== "file-history-snapshot" &&
+      conv.type !== "queue-operation" &&
+      conv.type !== "progress" &&
+      conv.type !== "custom-title" &&
+      conv.type !== "agent-name",
+  )
+  .filter((conv) => conv.isSidechain === true);
+  ```
+- `isRootSidechain()` guard at lines 96-99: Add `"custom-title"` and `"agent-name"` to the early-return guard so they don't reach the `.uuid` access on line 104:
+  ```typescript
+  if (
+    conversation.type === "summary" ||
+    conversation.type === "file-history-snapshot" ||
+    conversation.type === "queue-operation" ||
+    conversation.type === "custom-title" ||
+    conversation.type === "agent-name"
+  ) {
+    return false;
+  }
+  ```
 
 ### Step 3: Backend — Add `customTitle` to session metadata
 
@@ -92,14 +133,14 @@ This alone fixes the schema validation errors — they'll parse correctly instea
 
 ### Step 4: Frontend — Display custom title in the UI
 
-Three places currently compute session titles with the same pattern:
+Four places currently compute session titles. Three share the same pattern:
 ```typescript
 const title = session.meta.firstUserMessage !== null
   ? firstUserMessageToTitle(session.meta.firstUserMessage)
   : session.id;
 ```
 
-Change all three to prioritize `customTitle`:
+Change these three to prioritize `customTitle`:
 ```typescript
 const title = session.meta.customTitle
   ?? (session.meta.firstUserMessage !== null
@@ -107,17 +148,31 @@ const title = session.meta.customTitle
     : session.id);
 ```
 
-Files to modify:
+Files with the shared pattern:
 - `src/app/projects/[projectId]/sessions/[sessionId]/components/sessionSidebar/SessionsTab.tsx` (line 112)
 - `src/app/components/SessionHistoryPopover.tsx` (line 171)
-- `src/app/projects/[projectId]/sessions/[sessionId]/components/SessionPageMain.tsx` (lines 256-259 and 588-593 — two separate title calculations in this file)
+- `src/app/projects/[projectId]/sessions/[sessionId]/components/SessionPageMain.tsx` (lines 588-593)
+
+**Note — different pattern at `SessionPageMain.tsx` line 256-259**: This location uses different variable names (`sessionData?.session.meta` with optional chaining, and `sessionId ?? ""` as fallback instead of `session.id`). Adapt the template accordingly:
+```typescript
+const sessionTitle = sessionData?.session.meta.customTitle
+  ?? (sessionData?.session.meta.firstUserMessage != null
+    ? firstUserMessageToTitle(sessionData.session.meta.firstUserMessage)
+    : (sessionId ?? ""));
+```
 
 ### Step 5: Search — Make custom titles searchable
+
+**Tests first** (modify `src/server/core/search/functions/extractSearchableText.test.ts`):
+- Returns `customTitle` string for `custom-title` entries
+- Returns `null` for `agent-name` entries
+
+**Then implement:**
 
 **Modify** `src/server/core/search/functions/extractSearchableText.ts`
 - Add a case: if `conversation.type === "custom-title"`, return `conversation.customTitle`
 - Add a case: if `conversation.type === "agent-name"`, return `null` (not useful for search)
-- These cases must be added before the final `return null` to satisfy TypeScript exhaustiveness
+- Note: `extractSearchableText` uses a catch-all `return null` (no `satisfies never` exhaustive check), so these cases are not strictly required by TypeScript — but they make the intent explicit and prevent the new types from being silently ignored if the function is later refactored to be exhaustive
 
 **Modify** `src/server/core/search/services/SearchService.ts`
 - In `buildIndex()` (line 111), expand the type filter to also allow `"custom-title"` entries through:
@@ -141,6 +196,7 @@ Files to modify:
 | `src/lib/conversation-schema/entry/AgentNameEntrySchema.ts` | **Create** |
 | `src/lib/conversation-schema/index.ts` | Modify |
 | `src/app/.../conversationList/ConversationList.tsx` | Modify |
+| `src/app/.../hooks/useSidechain.ts` | Modify |
 | `src/server/core/session/schema.ts` | Modify |
 | `src/server/core/session/services/SessionMetaService.ts` | Modify |
 | `src/server/core/session/testing/createMockSessionMeta.ts` | Modify |
@@ -151,6 +207,7 @@ Files to modify:
 | `src/server/core/search/services/SearchService.ts` | Modify |
 | `src/server/core/claude-code/functions/parseJsonl.test.ts` | Modify |
 | `src/server/core/session/services/SessionMetaService.test.ts` | Modify |
+| `src/server/core/search/functions/extractSearchableText.test.ts` | Modify |
 
 ## Test Inventory
 
@@ -167,7 +224,7 @@ All tests to be written (placed here for reference; write each test inline with 
 6. When multiple `custom-title` entries exist, the last one wins
 7. `customTitle` extraction works regardless of entry position (beginning, middle, end of JSONL)
 
-### `extractSearchableText` (if tests exist for this module, otherwise add to search test file)
+### `extractSearchableText.test.ts`
 8. Returns `customTitle` string for `custom-title` entries
 9. Returns `null` for `agent-name` entries
 
