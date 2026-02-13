@@ -1,5 +1,14 @@
 # Plan: Support `custom-title` and `agent-name` JSONL Entry Types
 
+## Status
+
+| Phase | Status | PR | Notes |
+|-------|--------|----|-------|
+| Plan 1 — Fix Schema Parse Errors | **Complete** | [#152](https://github.com/d-kimuson/claude-code-viewer/pull/152) | Fixes [#151](https://github.com/d-kimuson/claude-code-viewer/issues/151). Implemented 2026-02-13. Two additional files (`ProjectMetaService.ts`, `ExportService.ts`) needed type cascade fixes beyond the original plan. |
+| Plan 2 — Display and Index Custom Titles | Not started | — | Depends on Plan 1 being merged. |
+
+---
+
 ## Context
 
 When a user runs `/rename` in Claude Code, two new JSONL entry types are written to the session log:
